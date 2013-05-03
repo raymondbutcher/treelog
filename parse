@@ -1,0 +1,20 @@
+#!/usr/bin/env python
+
+import re
+import sys
+
+
+pattern = re.compile(r'(?P<duration>\d+) "(?P<method>[A-Z]+) (?P<path>.+?)(\?.*)? HTTP/.+?" (?P<status>\d+) (?P<bytes>-|\d+)')
+http_pattern = re.compile(r'^https?://.+?/')
+
+for line in sys.stdin:
+    match = pattern.search(line)
+    if match:
+        sys.stdout.write(http_pattern.sub('/', match.group('path')))
+        sys.stdout.write(' ')
+        sys.stdout.write(match.group('bytes').replace('-', '0'))
+        sys.stdout.write(' ')
+        sys.stdout.write(match.group('duration'))
+        sys.stdout.write('\n')
+    else:
+        sys.stderr.write('Unexpected: ' + line)

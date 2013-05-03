@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<!--
+http://www.d3noob.org/2013/01/adding-tooltips-to-d3js-graph.html
+http://mbostock.github.io/d3/talk/20111018/treemap.html
+-->
+<html>
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8"/>
+        <link type="text/css" rel="stylesheet" href="style.css"/>
+        <script type="text/javascript" src="http://cdnjs.cloudflare.com/ajax/libs/d3/3.0.8/d3.min.js"></script>
+        <style type="text/css">
+            .chart {
+              display: block;
+              margin: auto;
+              margin-top: 40px;
+            }
+            text {
+              font-size: 11px;
+              cursor: default;
+            }
+            rect {
+              fill: none;
+            }
+            div.tooltip {   
+              position: absolute;
+              text-align: center;
+              padding: 5px 10px;
+              font: 14px sans-serif;
+              background: lightsteelblue;
+              border: 0px;
+              border-radius: 8px;
+              pointer-events: none;
+            }
+            .link {
+                cursor: pointer;
+            }
+            .link:hover {
+                text-decoration: underline;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="body">
+            <div id="footer">
+                <div id="footer-text"></div>
+                <div class="hint">click or option-click to descend or ascend</div>
+                <div>
+                    <select>
+                        <option value="hits">Hits</option>
+                        <option value="kilobytes">Size (total)</option>
+                        <option value="kilobytes-average">Size (average)</option>
+                        <option value="millseconds">Time (total)</option>
+                        <option value="millseconds-average">Time (average)</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+        <script type="text/javascript">
+
+var w = 1280 - 80,
+    h = 800 - 180,
+    x = d3.scale.linear().range([0, w]),
+    y = d3.scale.linear().range([0, h]),
+    color = d3.scale.category20c(),
+    root,
+    node;
+
+
+function getHits(d) {
+    return parseInt(d.hits);
+}
+
+function getKiloBytes(d) {
+    return parseInt(parseInt(d.bytes) / 1024);
+}
+
+function getKiloBytesAverage(d) {
+    return parseInt(getKiloBytes(d) / getHits(d))
+}
+
+function getMilliseconds(d) {
+    return parseInt(d.milliseconds);
+}
+
+function getMillisecondsAverage(d) {
+    return parseInt(getMilliseconds(d) / getHits(d));
+}
+
+function getValueFunc(type) {
+    if (type == "kilobytes") {
+        return getKiloBytes
+    } else if (type == "kilobytes-average") {
+        return getKiloBytesAverage
+    } else if (type == "millseconds") {
+        return getMilliseconds
+    } else if (type == "millseconds-average") {
+        return getMillisecondsAverage
+    } else {
+        return getHits
+    }
+}
+
+var treemap = d3.layout.treemap()
+    .round(false)
+    .size([w, h])
+    .sticky(true)
+    .value(getValueFunc());
+
+var svg = d3.select("#body").append("div")
+    .attr("id", "chart")
+    .attr("class", "chart")
+    .style("width", w + "px")
+    .style("height", h + "px")
+  .append("svg:svg")
+    .attr("width", w)
+    .attr("height", h)
+  .append("svg:g")
+    .attr("transform", "translate(.5,.5)");
+
+var tooltip = d3.select("body").append("div")   
+    .attr("class", "tooltip")               
+    .style("opacity", 0);
+
+function hideTooltip() {
+    tooltip.transition()
+        .duration(500)
+        .style("opacity", 0);
+}
+
+var query = window.location.search && window.location.search.substring(1),
+    url = query ? './json/' + query + '.json' : './json/root.json',
+    timestamp = new Date().getTime(),
+    newUrl = url + '?' + timestamp;
+
+d3.json(newUrl, function handleData(error, data) {
+
+    if (error) {
+        d3.select("#footer-text").text('it broke!');
+        return;
+    }
+
+    d3.select("#footer-text").text(data.name);
+
+    node = root = data;
+
+    var nodes = treemap.nodes(root)
+        .filter(function(d) { return !d.children; });
+
+    var cell = svg.selectAll("g")
+        .data(nodes)
+        .enter()
+        .append("svg:g")
+            .attr("class", "cell")
+            .attr("transform", function(d) {
+                return "translate(" + d.x + "," + d.y + ")";
+            })
+            .on("click", function(d) {
+                return zoom(node == d.parent ? root : d.parent);
+            })
+            .on("mousemove", function(d) {      
+                tooltip.transition()        
+                    .duration(200)      
+                    .style("opacity", .9);      
+                tooltip.html(
+                        d.name
+                        + '<br>hits: ' + getHits(d)
+                        + '<br>avg size: ' + getKiloBytesAverage(d) + 'kb'
+                        + '<br>avg response time: ' + getMillisecondsAverage(d) + 'ms'
+                    )  
+                    .style("left", (d3.event.pageX) + "px")     
+                    .style("top", (d3.event.pageY - 28) + "px");    
+                })                  
+            .on("mouseout", function(d) {       
+                hideTooltip();
+            });
+
+    cell.append("svg:rect")
+        .attr("width", function(d) { return Math.max(d.dx - 1, 0); })
+        .attr("height", function(d) { return Math.max(d.dy - 1, 0); })
+        .style("fill", function(d) { return color(d.parent.name); });
+
+    cell.append("svg:text")
+        .attr("x", function(d) { return d.dx / 2; })
+        .attr("y", function(d) { return d.dy / 2; })
+        .attr("dy", ".35em")
+        .attr("text-anchor", "middle")
+        .text(function(d) { return d.name; })
+        .style("visibility", function(d) {
+          d.w = this.getComputedTextLength();
+          return d.dx > d.w && d.dy > 18 ? "visible" : "hidden";
+        })
+        .style("opacity", function(d) {
+          d.w = this.getComputedTextLength();
+          return d.dx > d.w && d.dy > 18 ? 1 : 0;
+        })
+        .attr("class", function(d) {
+            return d.link && d.link != query ? "link" : "";
+        })
+        .on("click", function(d) {
+            if (d.link && d.link != query) {
+                window.location = '?' + d.link;
+                d3.event.stopPropagation();
+            }
+        });
+
+  d3.select(window).on("click", function() { zoom(root); hideTooltip(); });
+
+  d3.select("select").on("change", function() {
+    treemap.value(getValueFunc(this.value)).nodes(root);
+    zoom(node);
+    hideTooltip();
+  });
+
+});
+
+function count(d) {
+  return 1;
+}
+
+function zoom(d) {
+  var kx = w / d.dx, ky = h / d.dy;
+  x.domain([d.x, d.x + d.dx]);
+  y.domain([d.y, d.y + d.dy]);
+
+  var t = svg.selectAll("g.cell").transition()
+      .duration(d3.event.altKey ? 7500 : 750)
+      .attr("transform", function(d) { return "translate(" + x(d.x) + "," + y(d.y) + ")"; });
+
+  t.select("rect")
+      .attr("width", function(d) { return Math.max(kx * d.dx - 1, 0); })
+      .attr("height", function(d) { return Math.max(ky * d.dy - 1, 0); })
+
+  t.select("text")
+      .attr("x", function(d) { return kx * d.dx / 2; })
+      .attr("y", function(d) { return ky * d.dy / 2; })
+      .style("visibility", function(d) {
+        return kx * d.dx > d.w && d.dy > 18 ? "visible" : "hidden";
+      })
+      .style("opacity", function(d) {
+        return kx * d.dx > d.w && d.dy > 18 ? 1 : 0;
+      });
+
+  node = d;
+  d3.event.stopPropagation();
+}
+
+        </script>
+    </body>
+</html>

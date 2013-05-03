@@ -1,0 +1,364 @@
+#!/usr/bin/env python
+
+import json
+import hashlib
+import itertools
+import operator
+import os
+import sys
+
+
+TARGET_SIZE = 250
+
+sort_by_hits = operator.attrgetter('hits')
+sort_by_depth = operator.attrgetter('depth')
+
+
+class PathTree(dict):
+
+    def __init__(self, path='', parent=None):
+
+        self.path = path
+        self.parent = parent
+
+        if parent is None:
+            self.depth = 0
+            self.full_path = path
+        else:
+            self.depth = parent.depth + 1
+            if self.depth > 1:
+                self.full_path = '%s/%s' % (parent.full_path, path)
+            else:
+                self.full_path = path
+
+        self.hits = 0
+        self.hits_sum = 0
+
+        self.bytes = 0
+        self.bytes_sum = 0
+
+        self.milliseconds = 0
+        self.milliseconds_sum = 0
+
+    def __repr__(self):
+        return repr(self.full_path)
+
+    def __str__(self):
+        return self.full_path
+
+    def condense(self, size):
+
+        if size:
+            while len(self) == -1:
+                child = self.values()[0]
+                if self.hits_sum != child.hits:
+                    break
+                self.path += '/' + child.path
+                self.clear()
+                self.update(child)
+                child.clear()
+                if hasattr(child, 'other'):
+                    if not hasattr(self, 'other'):
+                        self.other = self.__class__('*', parent=self)
+                    self.other.bytes_sum += child.other.bytes_sum
+                    self.other.milliseconds_sum += child.other.milliseconds_sum
+                    self.other.hits_sum += child.other.hits_sum
+
+        if len(self) > size:
+            children = self.top_children(size)
+            bytes_sum = 0
+            milliseconds_sum = 0
+            hits_sum = 0
+            for key, child in self.iteritems():
+                if key not in children:
+                    bytes_sum += child.bytes_sum
+                    milliseconds_sum += child.milliseconds_sum
+                    hits_sum += child.hits_sum
+                    child.clear()
+            self.clear()
+            self.update(children)
+            if not hasattr(self, 'other'):
+                self.other = self.__class__('*', parent=self)
+            self.other.bytes_sum += bytes_sum
+            self.other.milliseconds_sum += milliseconds_sum
+            self.other.hits_sum += hits_sum
+
+    @property
+    def has_children(self):
+        if len(self) >= 1:
+            return True
+        elif self.hits_sum > self.hits:
+            return True
+        else:
+            return False
+
+    def get_name(self):
+        name = self.full_path or '/'
+        if self.has_children:
+            if name.endswith('/*'):
+                pass
+            elif name.endswith('/'):
+                name = '%s*' % name
+            else:
+                name = '%s/*' % name
+        return name
+
+    def format(self, levels=2):
+
+        name = self.get_name()
+
+        data = {
+            'name': name,
+            'hits': self.hits_sum,
+            'bytes': self.bytes_sum,
+            'milliseconds': self.milliseconds_sum,
+        }
+
+        if self.has_children:
+            # Avoid linking to more than 1 level down.
+            if levels > 0:
+                link_src = name
+            else:
+                link_src = self.parent.get_name()
+            if link_src.endswith('/*'):
+                link_src = link_src[:-2]
+            elif link_src.endswith('/'):
+                link_src = link_src[:-1]
+            #elif not link_src.endswith('/'):
+            #    link_src = link_src + '/'
+            # Only actually add a link in the JSON to the bottom level.
+            #if not len(self):
+            data['link'] = get_hash(link_src)
+
+        if levels and len(self):
+            levels -= 1
+            children = []
+            for child_path, child_node in self.iteritems():
+                children.append(
+                    child_node.format(levels=levels)
+                )
+            if hasattr(self, 'other'):
+                children.append(
+                    self.other.format(levels=0)
+                )
+            data['children'] = children
+
+        return data
+
+    def write(self, _sort=lambda node: node.hits_sum):
+
+        assert len(self) <= TARGET_SIZE, '%r has too many children (%d).' % (self, len(self))
+
+        if hasattr(self, 'written'):
+            return
+        else:
+            self.written = True
+
+        if self.full_path:
+            link = get_hash(self.full_path)
+            filename = '%s.json' % link
+        else:
+            filename = 'root.json'
+
+        json_path = os.path.join('json', filename)
+
+        print 'Writing %s to %s' % (self.full_path or '/', filename)
+
+        data = self.format()
+
+        try:
+            open_file = open(json_path, 'w')
+        except IOError:
+            os.makedirs(os.path.dirname(json_path))
+            open_file = open(json_path, 'w')
+
+        json.dump(data, open_file, indent=4)
+
+        open_file.close()
+
+        #for child in self.values():
+        #    child.write()
+        #    #child.clear()
+
+    def insert(self, path, num_bytes, num_milliseconds, num_hits):
+        """
+        >>> tree = PathTree()
+        >>> x = tree.insert('/')
+        >>> x = tree.insert('/topic/dogs/')
+        >>> x = tree.insert('/topic/dogs/')
+        >>> x = tree.insert('/topic/cats/')
+        >>> tree
+        {'': {'': {}, 'topic': {'cats': {'': {}}, 'dogs': {'': {}}}}}
+        >>> root = tree['']
+        >>> (
+        ...     root[''].hits,
+        ...     root['topic']['dogs'][''].hits,
+        ...     root['topic']['cats'][''].hits,
+        ... )
+        (1, 2, 1)
+        >>> (
+        ...     root.hits_sum,
+        ...     root['topic'].hits_sum,
+        ...     root['topic']['dogs'].hits_sum,
+        ...     root['topic']['cats'].hits_sum,
+        ... )
+        (4, 3, 2, 1)
+
+        """
+
+        self.bytes_sum += num_bytes
+        self.milliseconds_sum += num_milliseconds
+        self.hits_sum += num_hits
+
+        try:
+            path, more = path.split('/', 1)
+        except ValueError:
+            more = None
+
+        if path in self:
+            child = self[path]
+        else:
+            child = self[path] = self.__class__(path, self)
+
+        if more is None:
+            child.bytes += num_bytes
+            child.bytes_sum += num_bytes
+            child.milliseconds += num_milliseconds
+            child.milliseconds_sum += num_milliseconds
+            child.hits += num_hits
+            child.hits_sum += num_hits
+            return self
+        else:
+            return child.insert(more, num_bytes, num_milliseconds, num_hits)
+
+    def top_children(self, limit, _sort=lambda item: item[1].hits_sum):
+        children = sorted(self.items(), key=_sort, reverse=True)
+        return dict(children[:limit])
+
+
+def get_hash(string, _cache={}):
+    if string not in _cache:
+        _cache[string] = hashlib.md5(string).hexdigest()
+    return _cache[string]
+
+
+def read_stdin():
+    """Read parsed and sorted log information from standard input."""
+
+    first_line = next(sys.stdin, '').rstrip()
+
+    if first_line == '--test':
+        import doctest
+        doctest.testmod()
+        return
+
+    # Handle blank lines differently.
+    for line in itertools.chain([first_line], sys.stdin):
+        line = line.rstrip()
+        if line:
+            yield line
+            break
+    else:
+        sys.stderr.write('No log information to build!')
+        sys.exit(1)
+
+    # Because the input will be sorted, there is
+    # no need to check the validity of any more lines.
+    for line in sys.stdin:
+        yield line.rstrip()
+
+
+def node_parents(node):
+    nodes = []
+    while node.parent is not None:
+        nodes.insert(0, node)
+        node = node.parent
+    return nodes
+
+
+def done_nodes(old_node, new_node):
+    old_nodes = node_parents(old_node)
+    new_nodes = node_parents(new_node)
+    for old_node, new_node in itertools.izip_longest(old_nodes, new_nodes):
+        if old_node is None:
+            break
+        if old_node is not new_node:
+            yield old_node
+            if not old_node:
+                break
+
+
+def build_tree():
+
+    tree = PathTree()
+    nodes = []
+
+    lines = read_stdin()
+
+    # Handle the first line of input separately so the other lines
+    # do not need to keep checking if they are the first line.
+    line = next(lines)
+    path, num_bytes, num_milliseconds, num_hits = line.rsplit(' ', 3)
+    node = tree.insert(path, int(num_bytes), int(num_milliseconds), int(num_hits))
+    last_node = node
+    nodes.append(last_node)
+
+    for line in lines:
+        path, num_bytes, num_milliseconds, num_hits = line.rsplit(' ', 3)
+        node = tree.insert(path, int(num_bytes), int(num_milliseconds), int(num_hits))
+        if node is not last_node:
+            for done_node in done_nodes(last_node, node):
+                done_node.condense(size=TARGET_SIZE)
+                print str(done_node)
+            last_node = node
+
+    return tree['']
+
+
+def get_nodes(node, _result=None):
+    if _result is None:
+        _result = [node]
+    for child in node.values():
+        _result.append(child)
+        get_nodes(child, _result)
+    return _result
+
+
+def get_top_paths(nodes, target_size=TARGET_SIZE, _sort=sort_by_hits):
+    top_paths = set()
+    for node in sorted(nodes, key=_sort, reverse=True)[:target_size]:
+        for node in node_parents(node):
+            top_paths.add(node.full_path)
+    return top_paths
+
+
+def condense_nodes(root, target_size=TARGET_SIZE):
+    nodes = get_nodes(root)
+    top_paths = get_top_paths(nodes, target_size=target_size)
+    for node in nodes:
+        #if node.full_path in top_paths:
+        limit = sum(int(child.full_path in top_paths) for child in node.itervalues())
+        #node.condense(size=TARGET_SIZE)
+        node.condense(size=limit)
+        #else:
+        #    node.condense(size=0)
+
+    assert root in nodes
+
+
+# Build the whole tree structure.
+tree = build_tree()
+
+# Determine which nodes will be display at the root level of the graph
+all_nodes = get_nodes(tree)
+top_paths = get_top_paths(all_nodes)
+
+# Now loop through all nodes, from deepest to most shallow, and write out
+# the JSON. As it goes higher in the tree, it will condense the nodes again
+# and clear out the written ones.
+for node in sorted(all_nodes, key=sort_by_depth, reverse=True):
+    if node.full_path in top_paths:
+        condense_nodes(node)
+        node.write()
+    else:
+        node.condense(size=0)

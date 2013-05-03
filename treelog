@@ -1,0 +1,22 @@
+#/bin/sh
+
+if `which -s pypy`
+then
+    pypy="pypy"
+else
+    pypy="python"
+fi
+
+# Try to use pypy, it's slightly faster in this case.
+parse="$pypy parse"
+
+# But standard python is faster for these scripts.
+read="python read"
+combine="python combine"
+build="python build"
+
+# Use the linux sort command to sort the output. It doesn't use that much
+# memory because it uses a merge-sort algorithm with temporary files.
+sort="sort"
+
+$read $@ | $parse | $sort | $combine | $build
